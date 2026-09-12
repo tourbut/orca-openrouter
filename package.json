@@ -1,0 +1,22 @@
+{
+  "name": "orca-openrouter-usage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Orca sidebar plugin for OpenRouter activity, cost, and token usage.",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "tsx --test tests/*.test.ts",
+    "verify:api": "tsx scripts/verify-activity.ts",
+    "preview": "npm run build && tsx scripts/preview-host.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.1",
+    "esbuild": "^0.25.9",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
