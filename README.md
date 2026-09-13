@@ -44,7 +44,7 @@ Orca 명령 팔레트에서 **OpenRouter: Open Dashboard**를 실행하면, 플�
 ## 확인한 Orca 1.4.198 제약
 
 - 패널 CSP `connect-src 'none'`, 패널 공개 action은 workspace/terminal/notification뿐
-- 워커 env는 allowlist. 전형적인 Electron PATH에는 `orca-ide`가 없음. 워커는 `~/.local/bin/orca-ide` 등 검증된 절대 경로를 쓰고, Linux에서 `/usr/bin/orca`(GNOME 스크린 리더)는 호출하지 않음
+- 워커 env는 allowlist라 셸에 등록된 CLI가 PATH에 없을 수 있음. 실행 중인 Orca의 번들 CLI를 Electron Node 모드로 직접 호출하며, Linux에서 `/usr/bin/orca`(GNOME 스크린 리더)는 호출하지 않음. macOS/Windows/Linux 번들 경로 탐색은 자동 테스트로, 실제 번들 CLI 호출은 Linux에서 확인함
 - 워커 cwd는 Electron cwd(이 호스트에서는 `/home/shin`)라 `worktree current`가 실패함. `tab create --worktree path:<워크트리>`는 성공함
 - 워커 유휴 회수 5분, 명령 timeout 30초. HTTP 리스너만으로는 유휴 타이머가 갱신되지 않음. 인증된 대시보드 요청마다 `settings.get` host call로 활동을 갱신함. 탭을 5분 동안 쓰지 않으면 워커가 회수될 수 있으며, 그때는 명령을 다시 실행하면 됨
 - Chromium은 일부 포트를 차단함. 동적 포트가 unsafe면 다시 bind함

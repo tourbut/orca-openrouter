@@ -3,7 +3,7 @@
   "id": "openrouter-usage",
   "publisher": "tourbut",
   "name": "OpenRouter Usage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Open an OpenRouter usage dashboard from the command palette. Live data runs in an Orca browser tab.",
   "author": { "name": "tourbut" },
   "repository": "https://github.com/tourbut/orca-openrouter",

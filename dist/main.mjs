@@ -98,24 +98,33 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, win32, posix } from "node:path";
 var GNOME_ORCA = "/usr/bin/orca";
-function resolveOrcaCli(env = process.env) {
+function resolveOrcaCli(env = process.env, runtime2 = {}) {
+  const platform = runtime2.platform ?? process.platform;
+  const paths = platform === "win32" ? win32 : posix;
+  const exists = runtime2.exists ?? existsSync;
+  const executableDir = paths.dirname(runtime2.execPath ?? process.execPath);
+  const resources = platform === "darwin" ? paths.resolve(executableDir, "../Resources") : paths.join(executableDir, "resources");
+  const bundled = paths.join(resources, "app.asar.unpacked", "out", "cli", "index.js");
+  if (exists(bundled)) return bundled;
   const home = env.HOME || homedir();
   const pathDirs = (env.PATH ?? "").split(delimiter).filter(Boolean);
   const named = [];
   for (const dir of pathDirs) {
     named.push(join(dir, "orca-ide"), join(dir, "orca-dev"));
+    if (platform === "darwin") named.push(join(dir, "orca"));
   }
   const candidates = [
     env.ORCA_CLI_COMMAND,
     ...named,
     join(home, ".local/bin/orca-ide"),
-    join(home, ".local/opt/orca/squashfs-root/resources/bin/orca-ide")
+    join(home, ".local/opt/orca/squashfs-root/resources/bin/orca-ide"),
+    ...platform === "darwin" ? ["/usr/local/bin/orca", join(home, ".local/bin/orca")] : []
   ].filter((value) => typeof value === "string" && value.length > 0);
   for (const candidate of candidates) {
     if (candidate === "orca" || candidate === GNOME_ORCA) continue;
-    if (existsSync(candidate)) return candidate;
+    if (exists(candidate)) return candidate;
   }
   throw new Error("Could not find the Orca CLI (orca-ide). It is not on the plugin worker PATH.");
 }
@@ -124,9 +133,16 @@ function runOrcaCli(cli, args, options) {
     return Promise.reject(new Error("refusing to invoke the GNOME Orca screen reader"));
   }
   return new Promise((resolve, reject) => {
-    const child = spawn(cli, args, {
+    const bundled = /[\\/]app\.asar\.unpacked[\\/]out[\\/]cli[\\/]index\.js$/.test(cli);
+    const env = { ...process.env };
+    if (bundled) {
+      env.ELECTRON_RUN_AS_NODE = "1";
+      delete env.NODE_OPTIONS;
+      delete env.NODE_REPL_EXTERNAL_MODULE;
+    }
+    const child = spawn(bundled ? process.execPath : cli, bundled ? [cli, ...args] : args, {
       cwd: options?.cwd,
-      env: process.env,
+      env,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"]
     });
