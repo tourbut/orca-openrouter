@@ -1,5 +1,7 @@
 # Orca host patch: panel → worker requests
 
+This directory is **reference only**. The installable product uses **OpenRouter: Open Dashboard** and does not require applying this patch.
+
 Installed Orca **1.4.198** (verified locally) does not expose a public panel-to-worker request API.
 
 Confirmed from the 1.4.198 unpacked host API:

@@ -1,0 +1,370 @@
+"use strict";
+(() => {
+  // src/shared/generation.ts
+  function nextGeneration(current) {
+    return current + 1;
+  }
+  function isCurrentGeneration(expected, actual) {
+    return expected === actual;
+  }
+
+  // src/panel/format.ts
+  function formatUsd(value) {
+    if (!Number.isFinite(value)) return "\u2014";
+    const digits = Math.abs(value) > 0 && Math.abs(value) < 1e-4 ? 6 : 4;
+    return `$${value.toFixed(digits)}`;
+  }
+  function formatCount(value) {
+    if (!Number.isFinite(value)) return "\u2014";
+    return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value);
+  }
+  function formatTotals(totals) {
+    return {
+      usage: formatUsd(totals.usage),
+      requests: formatCount(totals.requests),
+      prompt: formatCount(totals.promptTokens),
+      completion: formatCount(totals.completionTokens),
+      reasoning: formatCount(totals.reasoningTokens),
+      byok: formatUsd(totals.byokUsageInference)
+    };
+  }
+
+  // src/panel/state.ts
+  var initialPanelState = () => ({
+    view: { kind: "probing" },
+    period: 7,
+    settingsOpen: false,
+    expandedModel: null,
+    statusNote: null
+  });
+  function modelRowKey(model, permaslug) {
+    return `${model}::${permaslug}`;
+  }
+  function applyConnection(state2, status) {
+    if (!status.connected) {
+      return { ...state2, view: { kind: "needs_key" }, settingsOpen: true };
+    }
+    return { ...state2, view: { kind: "loading", period: state2.period }, settingsOpen: false };
+  }
+  function applySnapshot(state2, snapshot) {
+    return {
+      ...state2,
+      period: snapshot.period,
+      view: { kind: "ready", snapshot },
+      statusNote: snapshot.stale ? "Showing cached data" : null
+    };
+  }
+  function applyError(state2, error, snapshot) {
+    if (error.code === "not_connected") {
+      return { ...state2, view: { kind: "needs_key" }, settingsOpen: true, statusNote: error.message };
+    }
+    return {
+      ...state2,
+      view: { kind: "error", error, snapshot, period: state2.period },
+      statusNote: error.message
+    };
+  }
+
+  // src/panel/render.ts
+  function el(tag, attrs = {}, children = []) {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(attrs)) {
+      if (key === "class") node.className = value;
+      else node.setAttribute(key, value);
+    }
+    for (const child of children) {
+      node.append(child);
+    }
+    return node;
+  }
+  function metric(label, value) {
+    return el("div", { class: "metric" }, [
+      el("div", { class: "metric-label" }, [label]),
+      el("div", { class: "metric-value" }, [value])
+    ]);
+  }
+  function chartSvg(daily) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 300 84");
+    svg.setAttribute("class", "chart");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "Daily usage cost");
+    const max = Math.max(0, ...daily.map((day) => day.totals.usage));
+    const n = daily.length || 1;
+    const gap = 2;
+    const width = (300 - gap * (n + 1)) / n;
+    daily.forEach((day, index) => {
+      const height = max > 0 ? day.totals.usage / max * 68 : 0;
+      const x = gap + index * (width + gap);
+      const y = 72 - height;
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("x", String(x));
+      rect.setAttribute("y", String(y));
+      rect.setAttribute("width", String(Math.max(width, 1)));
+      rect.setAttribute("height", String(Math.max(height, max === 0 ? 0 : 1)));
+      rect.setAttribute("rx", "1.5");
+      rect.setAttribute("class", "bar");
+      rect.setAttribute("data-date", day.date);
+      svg.appendChild(rect);
+    });
+    return svg;
+  }
+  function hostMissing() {
+    return el("div", { class: "banner warning" }, [
+      el("strong", {}, ["Host bridge required"]),
+      el(
+        "p",
+        {},
+        [
+          "Installed Orca 1.4.198 lets this panel call workspace/terminal/notification host actions only. There is no public panel-to-worker request API, and CSP blocks direct HTTP from the panel. Core aggregation, cache, and Activity API access are implemented in the worker and verified by tests. Apply host-patch/ to Orca, or use npm run preview / npm run verify:api."
+        ]
+      )
+    ]);
+  }
+  function snapshotBody(snapshot, state2, handlers) {
+    const totals = formatTotals(snapshot.totals);
+    const wrap = el("div", { class: "stack" });
+    wrap.append(
+      el("div", { class: "metrics" }, [
+        metric("Usage cost", totals.usage),
+        metric("Requests", totals.requests),
+        metric("Prompt tokens", totals.prompt),
+        metric("Completion tokens", totals.completion),
+        metric("Reasoning tokens", totals.reasoning),
+        metric("BYOK inference", totals.byok)
+      ]),
+      el("div", { class: "section" }, [
+        el("h2", {}, ["Daily usage cost"]),
+        chartSvg(snapshot.daily)
+      ])
+    );
+    const list = el("div", { class: "section" }, [el("h2", {}, ["Models"])]);
+    if (snapshot.models.length === 0) {
+      list.append(el("p", { class: "muted" }, ["No completed activity in this UTC window."]));
+    }
+    for (const model of snapshot.models) {
+      list.append(modelRow(model, state2, handlers));
+    }
+    if (snapshot.modelsTruncated) {
+      list.append(el("p", { class: "muted" }, ["Additional models were omitted to fit the panel payload limit."]));
+    }
+    wrap.append(list);
+    wrap.append(
+      el("p", { class: "footer" }, [
+        `Last fetch: ${snapshot.fetchedAt} \xB7 Data ${snapshot.dataStartDate} to ${snapshot.dataEndDate} UTC \xB7 cache ${snapshot.cache}${snapshot.stale ? " (stale)" : ""}`
+      ])
+    );
+    return wrap;
+  }
+  function modelRow(model, state2, handlers) {
+    const key = modelRowKey(model.model, model.modelPermaslug);
+    const open = state2.expandedModel === key;
+    const totals = formatTotals(model.totals);
+    const row = el("div", { class: "model" });
+    const button = el("button", { class: "model-toggle", type: "button" }, [
+      el("div", { class: "model-name" }, [
+        el("div", {}, [model.model]),
+        el("div", { class: "muted" }, [model.modelPermaslug])
+      ]),
+      el("div", { class: "model-stats" }, [`${totals.usage} \xB7 ${totals.requests}`])
+    ]);
+    button.addEventListener("click", () => handlers.toggleModel(key));
+    row.append(button);
+    if (open) {
+      const detail = el("div", { class: "providers" });
+      for (const provider of model.providers) {
+        detail.append(
+          el("div", { class: "provider" }, [
+            el("div", {}, [`${provider.providerName}`]),
+            el("div", { class: "muted" }, [
+              `${formatUsd(provider.totals.usage)} \xB7 ${formatCount(provider.totals.requests)} \xB7 ${provider.endpointId}`
+            ])
+          ])
+        );
+      }
+      row.append(detail);
+    }
+    return row;
+  }
+  function renderPanel(root2, state2, handlers) {
+    root2.replaceChildren();
+    const header = el("header", { class: "header" }, [
+      el("h1", {}, ["OpenRouter Usage"]),
+      el("button", { class: "ghost", type: "button", id: "settings" }, ["Settings"])
+    ]);
+    header.querySelector("#settings")?.addEventListener("click", () => handlers.toggleSettings());
+    const toolbar = el("div", { class: "toolbar" }, [
+      el("label", { class: "sr-only" }, ["Completed UTC days"]),
+      periodSelect(state2, handlers),
+      el("button", { class: "primary", type: "button", id: "refresh" }, ["Refresh"])
+    ]);
+    toolbar.querySelector("#refresh")?.addEventListener("click", () => handlers.refresh());
+    root2.append(header, toolbar, el("p", { class: "hint" }, ["UTC \xB7 today excluded \xB7 BYOK and reasoning are shown separately"]));
+    if (state2.statusNote) {
+      root2.append(el("div", { class: "banner" }, [state2.statusNote]));
+    }
+    if (state2.view.kind === "probing") {
+      root2.append(el("p", { class: "muted" }, ["Checking host bridge\u2026"]));
+    } else if (state2.view.kind === "host_missing") {
+      root2.append(hostMissing());
+    } else if (state2.view.kind === "needs_key") {
+      root2.append(el("p", { class: "muted" }, ["Store a management key to load completed Activity data."]));
+    } else if (state2.view.kind === "loading") {
+      root2.append(el("p", { class: "muted" }, ["Loading activity\u2026"]));
+    } else if (state2.view.kind === "ready") {
+      root2.append(snapshotBody(state2.view.snapshot, state2, handlers));
+    } else if (state2.view.kind === "error") {
+      root2.append(el("div", { class: "banner error" }, [state2.view.error.message]));
+      if (state2.view.snapshot) root2.append(snapshotBody(state2.view.snapshot, state2, handlers));
+    }
+    if (state2.settingsOpen && state2.view.kind !== "host_missing") {
+      root2.append(settingsForm(handlers, state2.view.kind !== "needs_key"));
+    }
+  }
+  function periodSelect(state2, handlers) {
+    const select = el("select", { "aria-label": "Completed UTC days" });
+    for (const days of [7, 30]) {
+      const option = el("option", { value: String(days) }, [`Last completed ${days} days`]);
+      option.selected = state2.period === days;
+      select.append(option);
+    }
+    select.addEventListener("change", () => {
+      handlers.setPeriod(select.value === "30" ? 30 : 7);
+    });
+    return select;
+  }
+  function settingsForm(handlers, connected) {
+    const form = el("form", { class: "settings" });
+    form.append(
+      el("h2", {}, ["Management key"]),
+      el("p", { class: "muted" }, [
+        "The key is stored in the Orca secret vault. The panel never reads it back."
+      ]),
+      el("input", {
+        type: "password",
+        name: "apiKey",
+        autocomplete: "off",
+        spellcheck: "false",
+        placeholder: "sk-or-v1-\u2026"
+      }),
+      el("div", { class: "row" }, [
+        el("button", { class: "primary", type: "button", id: "save-key" }, ["Save and verify"]),
+        ...connected ? [el("button", { class: "ghost", type: "button", id: "disconnect" }, ["Disconnect"])] : []
+      ])
+    );
+    form.querySelector("#save-key")?.addEventListener("click", () => {
+      const input = form.querySelector('input[name="apiKey"]');
+      const value = input.value;
+      input.value = "";
+      handlers.saveKey(value);
+    });
+    form.querySelector("#disconnect")?.addEventListener("click", () => handlers.disconnect());
+    return form;
+  }
+
+  // src/web/main.ts
+  var mount = document.getElementById("app");
+  if (!mount) throw new Error("missing #app");
+  var root = mount;
+  var sessionToken = "";
+  var state = initialPanelState();
+  var queryGeneration = 0;
+  function paint() {
+    renderPanel(root, state, {
+      refresh: () => void loadUsage(true),
+      setPeriod: (period) => void changePeriod(period),
+      toggleSettings: () => {
+        state = { ...state, settingsOpen: !state.settingsOpen };
+        paint();
+      },
+      saveKey: (apiKey) => void saveKey(apiKey),
+      disconnect: () => void disconnect(),
+      toggleModel: (key) => {
+        state = { ...state, expandedModel: state.expandedModel === key ? null : key };
+        paint();
+      }
+    });
+  }
+  async function api(path, body = {}) {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...sessionToken ? { authorization: `Bearer ${sessionToken}` } : {}
+      },
+      body: JSON.stringify(body)
+    });
+    return await response.json();
+  }
+  function asError(result) {
+    return {
+      code: result.errorCode ?? "unavailable",
+      message: result.error || "Request failed",
+      retryable: result.errorCode === "network" || result.errorCode === "timeout" || result.errorCode === "rate_limited"
+    };
+  }
+  async function loadUsage(forceRefresh = false) {
+    const generation = nextGeneration(queryGeneration);
+    queryGeneration = generation;
+    state = { ...state, view: { kind: "loading", period: state.period }, statusNote: null };
+    paint();
+    const result = await api("/api/usage/query", { period: state.period, forceRefresh });
+    if (!isCurrentGeneration(generation, queryGeneration)) return;
+    if (result.ok) {
+      state = applySnapshot(state, result.value);
+    } else {
+      state = applyError(state, asError(result), result.value);
+    }
+    paint();
+  }
+  async function changePeriod(period) {
+    queryGeneration = nextGeneration(queryGeneration);
+    state = { ...state, period };
+    await api("/api/preferences", { period }).catch(() => void 0);
+    await loadUsage(false);
+  }
+  async function saveKey(apiKey) {
+    const result = await api("/api/connection/save", { apiKey });
+    if (!result.ok) {
+      state = applyError(state, asError(result));
+      paint();
+      return;
+    }
+    state = applyConnection(state, result.value);
+    paint();
+    if (result.value.connected) await loadUsage(true);
+  }
+  async function disconnect() {
+    queryGeneration = nextGeneration(queryGeneration);
+    await api("/api/connection/remove");
+    state = applyConnection(state, { connected: false });
+    paint();
+  }
+  async function boot() {
+    paint();
+    const params = new URLSearchParams(location.search);
+    const entryToken = params.get("entry") ?? "";
+    history.replaceState({}, "", "/");
+    const exchanged = await api("/api/session/exchange", { entryToken });
+    if (!exchanged.ok) {
+      state = applyError(state, {
+        code: "auth_failed",
+        message: "This dashboard link expired. Run OpenRouter: Open Dashboard again.",
+        retryable: false
+      });
+      paint();
+      return;
+    }
+    sessionToken = String(exchanged.value.sessionToken ?? "");
+    const status = await api("/api/connection/status");
+    if (!status.ok) {
+      state = applyError(state, asError(status));
+      paint();
+      return;
+    }
+    state = applyConnection(state, status.value);
+    paint();
+    if (status.value.connected) await loadUsage(false);
+  }
+  void boot();
+})();

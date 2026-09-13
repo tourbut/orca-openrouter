@@ -90,6 +90,91 @@ function parsePreferencesUpdate(params) {
   return { period };
 }
 
+// src/worker/open-dashboard.ts
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// src/worker/cli.ts
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { delimiter, join } from "node:path";
+var GNOME_ORCA = "/usr/bin/orca";
+function resolveOrcaCli(env = process.env) {
+  const home = env.HOME || homedir();
+  const pathDirs = (env.PATH ?? "").split(delimiter).filter(Boolean);
+  const named = [];
+  for (const dir of pathDirs) {
+    named.push(join(dir, "orca-ide"), join(dir, "orca-dev"));
+  }
+  const candidates = [
+    env.ORCA_CLI_COMMAND,
+    ...named,
+    join(home, ".local/bin/orca-ide"),
+    join(home, ".local/opt/orca/squashfs-root/resources/bin/orca-ide")
+  ].filter((value) => typeof value === "string" && value.length > 0);
+  for (const candidate of candidates) {
+    if (candidate === "orca" || candidate === GNOME_ORCA) continue;
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("Could not find the Orca CLI (orca-ide). It is not on the plugin worker PATH.");
+}
+function runOrcaCli(cli, args, options) {
+  if (cli === "orca" || cli === GNOME_ORCA) {
+    return Promise.reject(new Error("refusing to invoke the GNOME Orca screen reader"));
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn(cli, args, {
+      cwd: options?.cwd,
+      env: process.env,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const chunks = [];
+    const err = [];
+    child.stdout?.on("data", (d) => chunks.push(d));
+    child.stderr?.on("data", (d) => err.push(d));
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`orca CLI timed out: ${args[0] ?? ""}`));
+    }, options?.timeoutMs ?? 15e3);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({
+        ok: code === 0,
+        code,
+        stdout: Buffer.concat(chunks).toString("utf8"),
+        stderr: redactSecrets(Buffer.concat(err).toString("utf8"))
+      });
+    });
+  });
+}
+function parseCliJson(stdout) {
+  const start = stdout.indexOf("{");
+  if (start < 0) throw new Error("orca CLI did not return JSON");
+  return JSON.parse(stdout.slice(start));
+}
+function selectWorktree(worktrees, pluginRoot) {
+  const normalized = pluginRoot.replace(/\/+$/, "");
+  const byPath = worktrees.find((wt) => {
+    const path = (wt.path ?? "").replace(/\/+$/, "");
+    return path && (normalized === path || normalized.startsWith(`${path}/`));
+  });
+  const hit = byPath ?? worktrees.find((wt) => wt.isActive) ?? worktrees[0];
+  if (!hit?.path || !hit.id) return null;
+  return { id: hit.id, path: hit.path, selector: `path:${hit.path}` };
+}
+
+// src/worker/dashboard-server.ts
+import { createServer } from "node:http";
+import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join as join2 } from "node:path";
+
 // src/shared/bytes.ts
 function utf8Bytes(value) {
   return Buffer.byteLength(value, "utf8");
@@ -97,6 +182,411 @@ function utf8Bytes(value) {
 function jsonUtf8Bytes(value) {
   return utf8Bytes(JSON.stringify(value));
 }
+
+// src/worker/dashboard-server.ts
+var MAX_BODY_BYTES = 16 * 1024;
+var ENTRY_TTL_MS = 2 * 60 * 1e3;
+var CHROMIUM_UNSAFE_PORTS = /* @__PURE__ */ new Set([
+  1,
+  7,
+  9,
+  11,
+  13,
+  15,
+  17,
+  19,
+  20,
+  21,
+  22,
+  23,
+  25,
+  37,
+  42,
+  43,
+  53,
+  77,
+  79,
+  87,
+  95,
+  101,
+  102,
+  103,
+  104,
+  109,
+  110,
+  111,
+  113,
+  115,
+  117,
+  119,
+  123,
+  135,
+  139,
+  143,
+  179,
+  389,
+  427,
+  465,
+  512,
+  513,
+  514,
+  515,
+  526,
+  530,
+  531,
+  532,
+  540,
+  548,
+  556,
+  563,
+  587,
+  601,
+  636,
+  993,
+  995,
+  2049,
+  3659,
+  4045,
+  6e3,
+  6665,
+  6666,
+  6667,
+  6668,
+  6669,
+  6697
+]);
+var DashboardServer = class {
+  constructor(options) {
+    this.options = options;
+  }
+  server = null;
+  port = null;
+  entry = null;
+  sessions = /* @__PURE__ */ new Set();
+  closed = false;
+  get origin() {
+    if (this.port == null) throw new Error("dashboard server is not listening");
+    return `http://127.0.0.1:${this.port}`;
+  }
+  async listen() {
+    if (this.server && this.port != null) return { port: this.port, origin: this.origin };
+    this.closed = false;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const port = await this.listenOnce(0);
+      if (!CHROMIUM_UNSAFE_PORTS.has(port)) {
+        this.port = port;
+        return { port, origin: this.origin };
+      }
+      await this.stopListening();
+    }
+    throw new Error("could not bind a Chromium-safe loopback port");
+  }
+  mintEntryUrl() {
+    const token = randomBytes(24).toString("hex");
+    this.entry = { token, expiresAt: (this.options.now ?? Date.now)() + ENTRY_TTL_MS };
+    return `${this.origin}/?entry=${token}`;
+  }
+  async close() {
+    this.closed = true;
+    this.entry = null;
+    this.sessions.clear();
+    await this.stopListening();
+  }
+  listenOnce(port) {
+    return new Promise((resolve, reject) => {
+      const server = createServer((req, res) => {
+        void this.handle(req, res);
+      });
+      this.server = server;
+      server.on("error", reject);
+      server.listen(port, "127.0.0.1", () => {
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          reject(new Error("dashboard server bound without a port"));
+          return;
+        }
+        resolve(address.port);
+      });
+    });
+  }
+  stopListening() {
+    const server = this.server;
+    this.server = null;
+    this.port = null;
+    if (!server) return Promise.resolve();
+    return new Promise((resolve) => {
+      server.close(() => resolve());
+    });
+  }
+  async handle(req, res) {
+    try {
+      if (!this.allowHost(req)) {
+        this.send(res, 400, { ok: false, error: "invalid host" });
+        return;
+      }
+      const url = new URL(req.url ?? "/", this.origin);
+      if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
+        this.sendHtml(res, this.readAsset("dashboard.html"));
+        return;
+      }
+      if (req.method === "GET" && url.pathname === "/dashboard.js") {
+        this.sendJs(res, this.readAsset("dashboard.js"));
+        return;
+      }
+      if (req.method !== "POST" || !url.pathname.startsWith("/api/")) {
+        this.send(res, 404, { ok: false, error: "not found" });
+        return;
+      }
+      if (!this.allowOrigin(req)) {
+        this.send(res, 403, { ok: false, error: "invalid origin" });
+        return;
+      }
+      const body = await this.readJson(req);
+      if (body === "oversized") {
+        this.send(res, 413, { ok: false, error: "request too large" });
+        return;
+      }
+      if (body === "invalid") {
+        this.send(res, 400, { ok: false, error: "invalid json" });
+        return;
+      }
+      if (url.pathname === "/api/session/exchange") {
+        this.exchange(body, res);
+        return;
+      }
+      if (!this.authorized(req)) {
+        this.send(res, 401, { ok: false, error: "authentication required" });
+        return;
+      }
+      await this.options.keepAlive?.().catch(() => void 0);
+      const method = routeToMethod(url.pathname);
+      if (!method) {
+        this.send(res, 404, { ok: false, error: "unknown method" });
+        return;
+      }
+      const result = await this.options.service.dispatch(method, body);
+      if (jsonUtf8Bytes(result) > PANEL_MESSAGE_MAX_BYTES) {
+        this.send(res, 500, { ok: false, error: "result too large" });
+        return;
+      }
+      if (result.ok) {
+        this.send(res, 200, { ok: true, value: result.value });
+        return;
+      }
+      this.send(res, 200, {
+        ok: false,
+        errorCode: result.error.code,
+        error: redactSecrets(result.error.message),
+        value: result.snapshot
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "server error";
+      this.send(res, 500, { ok: false, error: redactSecrets(message) });
+    }
+  }
+  exchange(body, res) {
+    const token = typeof body === "object" && body && "entryToken" in body ? String(body.entryToken ?? "") : "";
+    const now = (this.options.now ?? Date.now)();
+    if (!this.entry || this.entry.token !== token || this.entry.expiresAt < now) {
+      this.send(res, 401, { ok: false, error: "entry token is invalid or expired" });
+      return;
+    }
+    this.entry = null;
+    const session = randomBytes(24).toString("hex");
+    this.sessions.add(session);
+    this.send(res, 200, { ok: true, value: { sessionToken: session } });
+  }
+  authorized(req) {
+    const header = req.headers.authorization ?? "";
+    const match = /^Bearer\s+(\S+)$/i.exec(header);
+    return Boolean(match && this.sessions.has(match[1] ?? ""));
+  }
+  allowHost(req) {
+    const host = (req.headers.host ?? "").toLowerCase();
+    return host === `127.0.0.1:${this.port}` || host === `localhost:${this.port}`;
+  }
+  allowOrigin(req) {
+    const origin = req.headers.origin;
+    if (!origin) return true;
+    return origin === `http://127.0.0.1:${this.port}` || origin === `http://localhost:${this.port}`;
+  }
+  readAsset(name) {
+    return readFileSync(join2(this.options.pluginRoot, "dist", name), "utf8");
+  }
+  readJson(req) {
+    return new Promise((resolve) => {
+      const chunks = [];
+      let size = 0;
+      req.on("data", (chunk) => {
+        size += chunk.length;
+        if (size > MAX_BODY_BYTES) {
+          req.destroy();
+          resolve("oversized");
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on("end", () => {
+        if (size === 0) {
+          resolve({});
+          return;
+        }
+        try {
+          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        } catch {
+          resolve("invalid");
+        }
+      });
+      req.on("error", () => resolve("invalid"));
+    });
+  }
+  send(res, status, body) {
+    const json = JSON.stringify(body);
+    res.writeHead(status, {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff"
+    });
+    res.end(json);
+  }
+  sendHtml(res, html) {
+    res.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      "content-security-policy": "default-src 'none'; connect-src 'self'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'"
+    });
+    res.end(html);
+  }
+  sendJs(res, js) {
+    res.writeHead(200, {
+      "content-type": "text/javascript; charset=utf-8",
+      "cache-control": "no-store"
+    });
+    res.end(js);
+  }
+};
+function routeToMethod(pathname) {
+  const map = {
+    "/api/connection/status": "connection.status",
+    "/api/connection/save": "connection.save",
+    "/api/connection/remove": "connection.remove",
+    "/api/usage/query": "usage.query",
+    "/api/preferences": "preferences.update"
+  };
+  const method = map[pathname];
+  return method && isMethodName(method) ? method : null;
+}
+
+// src/worker/open-dashboard.ts
+function pluginRootFromModuleUrl(moduleUrl) {
+  return dirname(fileURLToPath(new URL(".", moduleUrl)));
+}
+var DashboardRuntime = class {
+  constructor(orca, service, pluginRoot) {
+    this.orca = orca;
+    this.service = service;
+    this.pluginRoot = pluginRoot;
+  }
+  server = null;
+  cli = null;
+  async open() {
+    try {
+      this.cli = this.cli ?? resolveOrcaCli();
+      if (!this.server) {
+        this.server = new DashboardServer({
+          pluginRoot: this.pluginRoot,
+          service: this.service,
+          keepAlive: async () => {
+            await this.orca.host.call("settings.get", {});
+          }
+        });
+        await this.server.listen();
+      }
+      const worktree = await this.resolveWorktree(this.cli);
+      if (!worktree) {
+        return {
+          ok: false,
+          error: "Could not resolve an Orca worktree for the browser tab. Open a worktree, then run Open Dashboard again."
+        };
+      }
+      const entryUrl = this.server.mintEntryUrl();
+      const reused = await this.reuseOrCreateTab(this.cli, worktree.selector, entryUrl);
+      return { ok: true, origin: this.server.origin, reused, worktree: worktree.selector };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "failed to open dashboard";
+      return { ok: false, error: message };
+    }
+  }
+  async stop() {
+    await this.server?.close();
+    this.server = null;
+  }
+  async resolveWorktree(cli) {
+    const listed = await runOrcaCli(cli, ["worktree", "list", "--json"]);
+    const parsed = parseCliJson(listed.stdout);
+    const worktrees = parsed.result?.worktrees ?? [];
+    const ps = await runOrcaCli(cli, ["worktree", "ps", "--json"]).catch(() => null);
+    const activeIds = /* @__PURE__ */ new Set();
+    if (ps?.ok) {
+      try {
+        const body = parseCliJson(ps.stdout);
+        for (const row of body.result?.workspaces ?? []) {
+          if (row.isActive && row.worktreeId) activeIds.add(row.worktreeId);
+        }
+      } catch {
+      }
+    }
+    const annotated = worktrees.map((wt) => ({
+      ...wt,
+      isActive: Boolean(wt.id && activeIds.has(wt.id))
+    }));
+    return selectWorktree(annotated, this.pluginRoot);
+  }
+  async reuseOrCreateTab(cli, selector, entryUrl) {
+    const origin = new URL(entryUrl).origin;
+    const listed = await runOrcaCli(cli, ["tab", "list", "--worktree", selector, "--json"]);
+    if (listed.ok) {
+      const body = parseCliJson(listed.stdout);
+      const existing = (body.result?.tabs ?? []).find((tab) => (tab.url ?? "").startsWith(origin));
+      if (existing?.browserPageId) {
+        await runOrcaCli(cli, [
+          "tab",
+          "switch",
+          "--page",
+          existing.browserPageId,
+          "--worktree",
+          selector,
+          "--focus",
+          "--json"
+        ]);
+        await runOrcaCli(cli, [
+          "goto",
+          "--url",
+          entryUrl,
+          "--page",
+          existing.browserPageId,
+          "--worktree",
+          selector,
+          "--json"
+        ]);
+        return true;
+      }
+    }
+    const created = await runOrcaCli(cli, [
+      "tab",
+      "create",
+      "--url",
+      entryUrl,
+      "--worktree",
+      selector,
+      "--json"
+    ]);
+    if (!created.ok) {
+      throw new Error(created.stderr || "tab create failed");
+    }
+    return false;
+  }
+};
 
 // src/shared/utc.ts
 var DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -478,6 +968,15 @@ var UsageService = class {
   cache;
   now;
   timeoutMs;
+  mutation = Promise.resolve();
+  enqueueMutation(run) {
+    const next = this.mutation.then(run, run);
+    this.mutation = next.then(
+      () => void 0,
+      () => void 0
+    );
+    return next;
+  }
   async dispatch(method, params) {
     switch (method) {
       case "connection.status":
@@ -497,6 +996,9 @@ var UsageService = class {
     return { connected: typeof key === "string" && key.length > 0 };
   }
   async saveConnection(params) {
+    return this.enqueueMutation(() => this.saveConnectionLocked(params));
+  }
+  async saveConnectionLocked(params) {
     const parsed = parseSaveConnectionRequest(params);
     if ("error" in parsed) {
       return fail({ code: "invalid_params", message: parsed.error, retryable: false });
@@ -523,8 +1025,6 @@ var UsageService = class {
       });
     }
     if (generation !== this.cache.generation) {
-      const current = await this.options.store.secretsGet(SECRET_KEY);
-      if (current === parsed.apiKey) await this.options.store.secretsDelete(SECRET_KEY);
       return fail({ code: "discarded", message: "Connection changed during verification.", retryable: true });
     }
     this.cache.bumpGeneration();
@@ -542,6 +1042,9 @@ var UsageService = class {
     return ok({ connected: true });
   }
   async removeConnection() {
+    return this.enqueueMutation(() => this.removeConnectionLocked());
+  }
+  async removeConnectionLocked() {
     this.cache.bumpGeneration();
     await this.options.store.secretsDelete(SECRET_KEY);
     await this.cache.clearPersisted();
@@ -567,20 +1070,32 @@ var UsageService = class {
     if (!forceRefresh && this.cache.memory && this.cache.isFresh(this.cache.memory, this.cache.memory.fingerprint, filterKey)) {
       return ok(this.snapshotFromCache(this.cache.memory, period, "fresh", false));
     }
-    return this.cache.dedupe(`account:${this.cache.generation}:${period}`, async () => {
+    const loaded = await this.loadItems(forceRefresh);
+    if (!loaded.ok) {
+      const snapshot = loaded.previous ? this.snapshotFromCache(loaded.previous, period, "stale", true) : void 0;
+      return fail(loaded.error, snapshot);
+    }
+    return ok(this.snapshotFromCache(loaded.entry, period, "fresh", false));
+  }
+  async loadItems(forceRefresh) {
+    const filterKey = "account";
+    return this.cache.dedupe(`account:${this.cache.generation}`, async () => {
       const apiKey = await this.options.store.secretsGet(SECRET_KEY);
       if (!apiKey) {
-        return fail({
-          code: "not_connected",
-          message: "No management key is stored.",
-          retryable: false
-        });
+        return {
+          ok: false,
+          error: {
+            code: "not_connected",
+            message: "No management key is stored.",
+            retryable: false
+          }
+        };
       }
       const fingerprint = await sha256Hex(apiKey);
       if (!forceRefresh) {
         const cached = await this.resolveCached(fingerprint, filterKey);
         if (cached && this.cache.isFresh(cached, fingerprint, filterKey)) {
-          return ok(this.snapshotFromCache(cached, period, "fresh", false));
+          return { ok: true, entry: cached };
         }
       }
       const generation = this.cache.generation;
@@ -591,16 +1106,18 @@ var UsageService = class {
         now: () => this.now().getTime()
       });
       if (generation !== this.cache.generation) {
-        return fail({
-          code: "discarded",
-          message: "A newer connection replaced this request.",
-          retryable: true
-        });
+        return {
+          ok: false,
+          error: {
+            code: "discarded",
+            message: "A newer connection replaced this request.",
+            retryable: true
+          }
+        };
       }
       if (!fetched.ok) {
         const previous = await this.resolveCached(fingerprint, filterKey);
-        const snapshot = previous ? this.snapshotFromCache(previous, period, "stale", true) : void 0;
-        return fail(fetched.error, snapshot);
+        return { ok: false, error: fetched.error, previous: previous ?? void 0 };
       }
       const entry = {
         fingerprint,
@@ -610,7 +1127,7 @@ var UsageService = class {
       };
       this.cache.remember(entry);
       await this.cache.persist(entry);
-      return ok(this.snapshotFromCache(entry, period, "fresh", false));
+      return { ok: true, entry };
     });
   }
   async resolveCached(fingerprint, filterKey) {
@@ -625,7 +1142,8 @@ var UsageService = class {
     return null;
   }
   snapshotFromCache(entry, period, cache, stale) {
-    return aggregateActivity(entry.items, period, this.now(), new Date(entry.fetchedAt), cache, stale);
+    const asOf = stale ? new Date(entry.fetchedAt) : this.now();
+    return aggregateActivity(entry.items, period, asOf, new Date(entry.fetchedAt), cache, stale);
   }
   async readPeriod() {
     const settings = await this.options.store.settingsGet();
@@ -686,6 +1204,7 @@ function createOrcaStore(orca) {
 }
 
 // src/worker/main.ts
+var runtime = null;
 function notificationBody(result) {
   if (result.ok) return formatNotificationSummary(result.value);
   const suffix = result.snapshot ? ` Last data: ${formatNotificationSummary(result.snapshot)}.` : "";
@@ -699,7 +1218,17 @@ async function activate(orca) {
   });
   const existing = await store.secretsGet(SECRET_KEY);
   await service.hydrateFromStorage(existing);
-  const dispatch = (method, params) => service.dispatch(method, params);
+  const pluginRoot = pluginRootFromModuleUrl(import.meta.url);
+  const dashboard = new DashboardRuntime(orca, service, pluginRoot);
+  runtime = dashboard;
+  orca.commands.register("openrouter.openDashboard", async () => {
+    const result = await dashboard.open();
+    await store.notify?.(
+      "OpenRouter Usage",
+      result.ok ? "Opened the usage dashboard in an Orca browser tab." : result.error ?? "Could not open the dashboard."
+    );
+    return result.ok ? { ok: true, reused: result.reused } : { ok: false, error: result.error };
+  });
   orca.commands.register("openrouter.status", async () => {
     const status = await service.connectionStatus();
     await store.notify?.(
@@ -725,17 +1254,23 @@ async function activate(orca) {
     return result.ok ? result.value : { ok: false, code: result.error.code };
   });
   if (orca.requests && typeof orca.requests.register === "function") {
-    const register = (method) => {
+    const dispatch = (method, params) => service.dispatch(method, params);
+    for (const method of [
+      "connection.status",
+      "connection.save",
+      "connection.remove",
+      "usage.query",
+      "preferences.update"
+    ]) {
       orca.requests.register(method, (params) => dispatch(method, params));
-    };
-    register("connection.status");
-    register("connection.save");
-    register("connection.remove");
-    register("usage.query");
-    register("preferences.update");
+    }
   } else {
-    orca.log("panel request API is not present on this Orca host");
+    orca.log("panel request API is not present; use Open Dashboard");
   }
+}
+async function deactivate() {
+  await runtime?.stop();
+  runtime = null;
 }
 function createStandaloneDispatcher(service) {
   return async (method, params) => {
@@ -750,5 +1285,6 @@ function createStandaloneDispatcher(service) {
 }
 export {
   createStandaloneDispatcher,
+  deactivate,
   activate as default
 };

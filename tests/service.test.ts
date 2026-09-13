@@ -172,7 +172,7 @@ test('concurrent periods do not return the first caller’s period', async () =>
   const [left, right] = await Promise.all([week, month])
   assert.equal(left.ok && left.value.period, 7)
   assert.equal(right.ok && right.value.period, 30)
-  assert.equal(fetches, 2)
+  assert.equal(fetches, 1)
 })
 
 test('cache is not fresh after the UTC date changes', async () => {
@@ -193,25 +193,16 @@ test('cache is not fresh after the UTC date changes', async () => {
   assert.equal(fetches, 2)
 })
 
-test('disconnect wins over a save that finishes storage later', async () => {
+test('disconnect queued after save runs second and leaves the key removed', async () => {
   const store = createMemoryStore()
-  const entered = deferred<void>()
-  const release = deferred<void>()
-  const original = store.secretsSet
-  store.secretsSet = async (key, value) => {
-    entered.resolve()
-    await release.promise
-    await original(key, value)
-  }
   const service = new UsageService({
     store,
     fetchImpl: async () => jsonResponse(200, { data: [] })
   })
   const save = service.saveConnection({ apiKey: 'sk-or-v1-newkey' })
-  await entered.promise
-  await service.removeConnection()
-  release.resolve()
-  const result = await save
-  assert.equal(result.ok, false)
+  const remove = service.removeConnection()
+  const [saved, removed] = await Promise.all([save, remove])
+  assert.equal(saved.ok, true)
+  assert.equal(removed.ok, true)
   assert.equal((await service.connectionStatus()).connected, false)
 })
