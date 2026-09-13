@@ -287,15 +287,20 @@
     });
   }
   async function api(path, body = {}) {
-    const response = await fetch(path, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...sessionToken ? { authorization: `Bearer ${sessionToken}` } : {}
-      },
-      body: JSON.stringify(body)
-    });
-    return await response.json();
+    try {
+      const response = await fetch(path, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...sessionToken ? { authorization: `Bearer ${sessionToken}` } : {}
+        },
+        body: JSON.stringify(body)
+      });
+      if (response.status === 401) return { ok: false, errorCode: "auth_failed", error: "Dashboard session expired. Run OpenRouter: Open Dashboard again." };
+      return await response.json();
+    } catch {
+      return { ok: false, errorCode: "network", error: "Cannot reach the dashboard worker. Run OpenRouter: Open Dashboard again." };
+    }
   }
   function asError(result) {
     return {
@@ -337,8 +342,8 @@
   }
   async function disconnect() {
     queryGeneration = nextGeneration(queryGeneration);
-    await api("/api/connection/remove");
-    state = applyConnection(state, { connected: false });
+    const result = await api("/api/connection/remove");
+    state = result.ok ? applyConnection(state, result.value) : applyError(state, asError(result));
     paint();
   }
   async function boot() {
@@ -349,11 +354,7 @@
     if (entryToken) {
       const exchanged = await api("/api/session/exchange", { entryToken });
       if (!exchanged.ok) {
-        state = applyError(state, {
-          code: "auth_failed",
-          message: "This dashboard link expired. Run OpenRouter: Open Dashboard again.",
-          retryable: false
-        });
+        state = applyError(state, asError(exchanged));
         paint();
         return;
       }

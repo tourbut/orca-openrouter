@@ -137,9 +137,14 @@ export class UsageService {
 
   private async removeConnectionLocked(): Promise<MethodResult<ConnectionStatus>> {
     this.cache.bumpGeneration()
-    await this.options.store.secretsDelete(SECRET_KEY)
-    await this.cache.clearPersisted()
-    return ok({ connected: false })
+    try {
+      await this.options.store.secretsDelete(SECRET_KEY)
+      await this.cache.clearPersisted()
+      return ok({ connected: false })
+    } finally {
+      // Also discard reads that started while the asynchronous deletion was running.
+      this.cache.bumpGeneration()
+    }
   }
 
   async updatePreferences(params: unknown): Promise<MethodResult<{ period: PeriodDays }>> {
@@ -153,11 +158,13 @@ export class UsageService {
   }
 
   async query(params: unknown): Promise<MethodResult<UsageSnapshot>> {
+    const generation = this.cache.generation
     const parsed = parseQueryRequest(params)
     if ('error' in parsed) {
       return fail({ code: 'invalid_params', message: parsed.error, retryable: false })
     }
     const period = parsed.period ?? (await this.readPeriod())
+    if (generation !== this.cache.generation) return this.discarded()
     const forceRefresh = parsed.forceRefresh === true
     const filterKey = 'account'
     if (!forceRefresh && this.cache.memory && this.cache.isFresh(this.cache.memory, this.cache.memory.fingerprint, filterKey)) {
@@ -165,6 +172,7 @@ export class UsageService {
     }
 
     const loaded = await this.loadItems(forceRefresh)
+    if (generation !== this.cache.generation) return this.discarded()
     if (!loaded.ok) {
       const snapshot = loaded.previous
         ? this.snapshotFromCache(loaded.previous, period, 'stale', true)
@@ -179,8 +187,10 @@ export class UsageService {
     | { ok: false; error: PluginError; previous?: CachedActivity }
   > {
     const filterKey = 'account'
+    const generation = this.cache.generation
     return this.cache.dedupe(`account:${this.cache.generation}`, async () => {
       const apiKey = await this.options.store.secretsGet(SECRET_KEY)
+      if (generation !== this.cache.generation) return this.discarded()
       if (!apiKey) {
         return {
           ok: false as const,
@@ -192,13 +202,14 @@ export class UsageService {
         }
       }
       const fingerprint = await sha256Hex(apiKey)
+      if (generation !== this.cache.generation) return this.discarded()
       if (!forceRefresh) {
-        const cached = await this.resolveCached(fingerprint, filterKey)
+        const cached = await this.resolveCached(fingerprint, filterKey, generation)
+        if (generation !== this.cache.generation) return this.discarded()
         if (cached && this.cache.isFresh(cached, fingerprint, filterKey)) {
           return { ok: true as const, entry: cached }
         }
       }
-      const generation = this.cache.generation
       const fetched = await fetchActivity({
         apiKey,
         timeoutMs: this.timeoutMs,
@@ -216,7 +227,8 @@ export class UsageService {
         }
       }
       if (!fetched.ok) {
-        const previous = await this.resolveCached(fingerprint, filterKey)
+        const previous = await this.resolveCached(fingerprint, filterKey, generation)
+        if (generation !== this.cache.generation) return this.discarded()
         return { ok: false as const, error: fetched.error, previous: previous ?? undefined }
       }
       const entry: CachedActivity = {
@@ -225,17 +237,25 @@ export class UsageService {
         fetchedAt: this.now().getTime(),
         items: fetched.items
       }
-      this.cache.remember(entry)
-      await this.cache.persist(entry)
-      return { ok: true as const, entry }
+      return this.enqueueMutation(async () => {
+        if (generation !== this.cache.generation) return this.discarded()
+        this.cache.remember(entry)
+        await this.cache.persist(entry)
+        return { ok: true as const, entry }
+      })
     })
   }
 
-  private async resolveCached(fingerprint: string, filterKey: string): Promise<CachedActivity | null> {
+  private discarded(): { ok: false; error: PluginError } {
+    return { ok: false, error: { code: 'discarded', message: 'Connection changed during the request.', retryable: true } }
+  }
+
+  private async resolveCached(fingerprint: string, filterKey: string, generation: number): Promise<CachedActivity | null> {
     if (this.cache.memory && this.cache.isUsable(this.cache.memory, fingerprint, filterKey)) {
       return this.cache.memory
     }
     const persisted = await this.cache.loadPersisted()
+    if (generation !== this.cache.generation) return null
     if (persisted && this.cache.isUsable(persisted, fingerprint, filterKey)) {
       this.cache.remember(persisted)
       return persisted
@@ -259,10 +279,12 @@ export class UsageService {
   }
 
   async hydrateFromStorage(apiKey: string | null): Promise<void> {
+    const generation = this.cache.generation
     if (!apiKey) return
     const persisted = await this.cache.loadPersisted()
     if (!persisted) return
     const fingerprint = await sha256Hex(apiKey)
+    if (generation !== this.cache.generation) return
     if (this.cache.isUsable(persisted, fingerprint, persisted.filterKey)) {
       this.cache.remember(persisted)
     }

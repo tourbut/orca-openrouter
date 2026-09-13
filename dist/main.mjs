@@ -283,7 +283,7 @@ var DashboardServer = class {
   }
   mintEntryUrl() {
     const token = randomBytes(24).toString("hex");
-    this.entry = { token, expiresAt: (this.options.now ?? Date.now)() + ENTRY_TTL_MS, session: void 0 };
+    this.entry = { token, expiresAt: (this.options.now ?? Date.now)() + ENTRY_TTL_MS };
     return `${this.origin}/?entry=${token}`;
   }
   async close() {
@@ -391,13 +391,9 @@ var DashboardServer = class {
       this.send(res, 401, { ok: false, error: "entry token is invalid or expired" });
       return;
     }
-    if (this.entry.session && this.sessions.has(this.entry.session)) {
-      this.send(res, 200, { ok: true, value: { sessionToken: this.entry.session } });
-      return;
-    }
     const session = randomBytes(24).toString("hex");
     this.sessions.add(session);
-    this.entry = { ...this.entry, session };
+    this.entry = null;
     this.send(res, 200, { ok: true, value: { sessionToken: session } });
   }
   authorized(req) {
@@ -1050,9 +1046,13 @@ var UsageService = class {
   }
   async removeConnectionLocked() {
     this.cache.bumpGeneration();
-    await this.options.store.secretsDelete(SECRET_KEY);
-    await this.cache.clearPersisted();
-    return ok({ connected: false });
+    try {
+      await this.options.store.secretsDelete(SECRET_KEY);
+      await this.cache.clearPersisted();
+      return ok({ connected: false });
+    } finally {
+      this.cache.bumpGeneration();
+    }
   }
   async updatePreferences(params) {
     const parsed = parsePreferencesUpdate(params);
@@ -1064,17 +1064,20 @@ var UsageService = class {
     return ok({ period });
   }
   async query(params) {
+    const generation = this.cache.generation;
     const parsed = parseQueryRequest(params);
     if ("error" in parsed) {
       return fail({ code: "invalid_params", message: parsed.error, retryable: false });
     }
     const period = parsed.period ?? await this.readPeriod();
+    if (generation !== this.cache.generation) return this.discarded();
     const forceRefresh = parsed.forceRefresh === true;
     const filterKey = "account";
     if (!forceRefresh && this.cache.memory && this.cache.isFresh(this.cache.memory, this.cache.memory.fingerprint, filterKey)) {
       return ok(this.snapshotFromCache(this.cache.memory, period, "fresh", false));
     }
     const loaded = await this.loadItems(forceRefresh);
+    if (generation !== this.cache.generation) return this.discarded();
     if (!loaded.ok) {
       const snapshot = loaded.previous ? this.snapshotFromCache(loaded.previous, period, "stale", true) : void 0;
       return fail(loaded.error, snapshot);
@@ -1083,8 +1086,10 @@ var UsageService = class {
   }
   async loadItems(forceRefresh) {
     const filterKey = "account";
+    const generation = this.cache.generation;
     return this.cache.dedupe(`account:${this.cache.generation}`, async () => {
       const apiKey = await this.options.store.secretsGet(SECRET_KEY);
+      if (generation !== this.cache.generation) return this.discarded();
       if (!apiKey) {
         return {
           ok: false,
@@ -1096,13 +1101,14 @@ var UsageService = class {
         };
       }
       const fingerprint = await sha256Hex(apiKey);
+      if (generation !== this.cache.generation) return this.discarded();
       if (!forceRefresh) {
-        const cached = await this.resolveCached(fingerprint, filterKey);
+        const cached = await this.resolveCached(fingerprint, filterKey, generation);
+        if (generation !== this.cache.generation) return this.discarded();
         if (cached && this.cache.isFresh(cached, fingerprint, filterKey)) {
           return { ok: true, entry: cached };
         }
       }
-      const generation = this.cache.generation;
       const fetched = await fetchActivity({
         apiKey,
         timeoutMs: this.timeoutMs,
@@ -1120,7 +1126,8 @@ var UsageService = class {
         };
       }
       if (!fetched.ok) {
-        const previous = await this.resolveCached(fingerprint, filterKey);
+        const previous = await this.resolveCached(fingerprint, filterKey, generation);
+        if (generation !== this.cache.generation) return this.discarded();
         return { ok: false, error: fetched.error, previous: previous ?? void 0 };
       }
       const entry = {
@@ -1129,16 +1136,23 @@ var UsageService = class {
         fetchedAt: this.now().getTime(),
         items: fetched.items
       };
-      this.cache.remember(entry);
-      await this.cache.persist(entry);
-      return { ok: true, entry };
+      return this.enqueueMutation(async () => {
+        if (generation !== this.cache.generation) return this.discarded();
+        this.cache.remember(entry);
+        await this.cache.persist(entry);
+        return { ok: true, entry };
+      });
     });
   }
-  async resolveCached(fingerprint, filterKey) {
+  discarded() {
+    return { ok: false, error: { code: "discarded", message: "Connection changed during the request.", retryable: true } };
+  }
+  async resolveCached(fingerprint, filterKey, generation) {
     if (this.cache.memory && this.cache.isUsable(this.cache.memory, fingerprint, filterKey)) {
       return this.cache.memory;
     }
     const persisted = await this.cache.loadPersisted();
+    if (generation !== this.cache.generation) return null;
     if (persisted && this.cache.isUsable(persisted, fingerprint, filterKey)) {
       this.cache.remember(persisted);
       return persisted;
@@ -1154,10 +1168,12 @@ var UsageService = class {
     return parsePeriod(settings[SETTINGS_PERIOD_KEY]) ?? 7;
   }
   async hydrateFromStorage(apiKey) {
+    const generation = this.cache.generation;
     if (!apiKey) return;
     const persisted = await this.cache.loadPersisted();
     if (!persisted) return;
     const fingerprint = await sha256Hex(apiKey);
+    if (generation !== this.cache.generation) return;
     if (this.cache.isUsable(persisted, fingerprint, persisted.filterKey)) {
       this.cache.remember(persisted);
     }

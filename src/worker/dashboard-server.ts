@@ -22,7 +22,7 @@ export type DashboardKeepAlive = () => Promise<void>
 export class DashboardServer {
   private server: Server | null = null
   private port: number | null = null
-  private entry: { token: string; expiresAt: number; session?: string } | null = null
+  private entry: { token: string; expiresAt: number } | null = null
   private sessions = new Set<string>()
   private closed = false
 
@@ -56,7 +56,7 @@ export class DashboardServer {
 
   mintEntryUrl(): string {
     const token = randomBytes(24).toString('hex')
-    this.entry = { token, expiresAt: (this.options.now ?? Date.now)() + ENTRY_TTL_MS, session: undefined }
+    this.entry = { token, expiresAt: (this.options.now ?? Date.now)() + ENTRY_TTL_MS }
     return `${this.origin}/?entry=${token}`
   }
 
@@ -172,13 +172,9 @@ export class DashboardServer {
       this.send(res, 401, { ok: false, error: 'entry token is invalid or expired' })
       return
     }
-    if (this.entry.session && this.sessions.has(this.entry.session)) {
-      this.send(res, 200, { ok: true, value: { sessionToken: this.entry.session } })
-      return
-    }
     const session = randomBytes(24).toString('hex')
     this.sessions.add(session)
-    this.entry = { ...this.entry, session }
+    this.entry = null
     this.send(res, 200, { ok: true, value: { sessionToken: session } })
   }
 

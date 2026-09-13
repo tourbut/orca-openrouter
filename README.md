@@ -14,6 +14,10 @@ Orca 명령 팔레트에서 **OpenRouter: Open Dashboard**를 실행하면, 플�
 
 다시 실행하면 저장된 연결을 복원하고, 같은 origin 탭이 있으면 재사용합니다.
 
+현재 검증은 자동 테스트와 메모리 저장소를 사용하는 워커 하네스까지입니다. 이 개발 환경에서는 OS 키링을 사용할 수 없어, 실제 Orca 설정 화면에서 설치·권한 승인 후 키를 저장하고 재시작하여 복원하는 과정은 아직 검증하지 못했습니다. Orca secrets 저장이 실패하면 키를 평문 파일에 대신 저장하지 않습니다.
+
+설치 확인 시 위 순서로 직접 권한을 승인하고, 키 저장 → 사용량 조회 → Orca 재시작 후 복원 → 연결 삭제를 확인해야 합니다. Orca 설정 파일이나 권한 동의 기록을 스크립트로 변경하지 마세요.
+
 ## 실제로 동작하는 것 / 하지 않는 것
 
 | 기능 | 상태 |
@@ -49,6 +53,8 @@ npm run verify:api
 ```
 
 `npm run preview`는 예전 패널 bridge 흉내입니다. 제품 확인은 Open Dashboard 명령으로 합니다.
+
+`scripts/invoke-open-dashboard.ts`와 `scripts/run-orca-plugin-worker.ts`는 secrets/settings를 메모리 저장소로 대체하는 개발 하네스입니다. 설치된 워커 런타임을 호출하더라도 실제 Orca vault 저장이나 GUI 설치 성공의 증거는 아닙니다.
 
 키 값은 로그·테스트 fixture·문서·커밋에 넣지 않습니다. `.env.example`은 빈 값입니다. 개발 검증만 `scripts/load-env.ts`가 `.env`를 직접 읽습니다. 제품 워커는 Orca secrets만 사용합니다.
 
