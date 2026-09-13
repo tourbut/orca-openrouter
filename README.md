@@ -6,6 +6,17 @@ Orca 명령 팔레트에서 **OpenRouter: Open Dashboard**를 실행하면, 플�
 
 ## 설치
 
+### GitHub에서 설치
+
+1. 로컬 PC의 Settings → Plugins에서 플러그인 시스템을 켭니다.
+2. Marketplaces에 `https://github.com/tourbut/orca-openrouter.git`를 추가합니다. ref 입력란이 있으면 `main`을 사용합니다.
+3. 목록에서 **OpenRouter Usage**를 설치하고 권한을 승인하여 활성화합니다.
+4. 명령 팔레트에서 **OpenRouter: Open Dashboard**를 실행하고 management key를 등록합니다.
+
+플러그인은 Orca를 실행 중인 PC에 설치됩니다. 원격 서버의 `/home/...` 경로를 Development에 입력할 필요가 없습니다. GitHub에는 빌드된 `dist/`도 포함되어 있습니다.
+
+### 로컬 개발 폴더에서 설치
+
 1. `npm run build` (배포 폴더에는 이미 `dist/`가 포함되어 있으면 생략 가능)
 2. Settings → Plugins에서 플러그인 시스템을 켭니다.
 3. Settings → Plugins → Development에 이 폴더 경로를 추가하고 권한을 승인합니다.

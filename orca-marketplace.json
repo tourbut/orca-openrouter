@@ -1,0 +1,16 @@
+{
+  "name": "Tourbut Orca Plugins",
+  "owner": "tourbut",
+  "plugins": [
+    {
+      "id": "tourbut.openrouter-usage",
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/tourbut/orca-openrouter.git",
+        "ref": "main"
+      },
+      "description": "OpenRouter usage dashboard in Orca's internal browser.",
+      "categories": ["utilities"]
+    }
+  ]
+}
