@@ -283,7 +283,7 @@ var DashboardServer = class {
   }
   mintEntryUrl() {
     const token = randomBytes(24).toString("hex");
-    this.entry = { token, expiresAt: (this.options.now ?? Date.now)() + ENTRY_TTL_MS };
+    this.entry = { token, expiresAt: (this.options.now ?? Date.now)() + ENTRY_TTL_MS, session: void 0 };
     return `${this.origin}/?entry=${token}`;
   }
   async close() {
@@ -391,9 +391,13 @@ var DashboardServer = class {
       this.send(res, 401, { ok: false, error: "entry token is invalid or expired" });
       return;
     }
-    this.entry = null;
+    if (this.entry.session && this.sessions.has(this.entry.session)) {
+      this.send(res, 200, { ok: true, value: { sessionToken: this.entry.session } });
+      return;
+    }
     const session = randomBytes(24).toString("hex");
     this.sessions.add(session);
+    this.entry = { ...this.entry, session };
     this.send(res, 200, { ok: true, value: { sessionToken: session } });
   }
   authorized(req) {

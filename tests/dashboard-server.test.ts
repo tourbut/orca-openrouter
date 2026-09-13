@@ -53,7 +53,16 @@ test('loopback dashboard requires a one-time entry token and rejects unauthentic
       headers: { 'content-type': 'application/json', origin },
       body: JSON.stringify({ entryToken: token })
     })
-    assert.equal(reuse.status, 401)
+    const reuseBody = (await reuse.json()) as { ok: boolean; value?: { sessionToken: string } }
+    assert.equal(reuseBody.ok, true)
+    assert.equal(reuseBody.value?.sessionToken, session)
+
+    const stale = await fetch(`${origin}/api/session/exchange`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ entryToken: 'dead' })
+    })
+    assert.equal(stale.status, 401)
 
     const status = await fetch(`${origin}/api/connection/status`, {
       method: 'POST',

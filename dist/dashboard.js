@@ -266,6 +266,7 @@
   var mount = document.getElementById("app");
   if (!mount) throw new Error("missing #app");
   var root = mount;
+  var SESSION_STORAGE_KEY = "openrouter.dashboard.session";
   var sessionToken = "";
   var state = initialPanelState();
   var queryGeneration = 0;
@@ -344,20 +345,35 @@
     paint();
     const params = new URLSearchParams(location.search);
     const entryToken = params.get("entry") ?? "";
-    history.replaceState({}, "", "/");
-    const exchanged = await api("/api/session/exchange", { entryToken });
-    if (!exchanged.ok) {
-      state = applyError(state, {
-        code: "auth_failed",
-        message: "This dashboard link expired. Run OpenRouter: Open Dashboard again.",
-        retryable: false
-      });
-      paint();
-      return;
+    if (entryToken) history.replaceState({}, "", "/");
+    if (entryToken) {
+      const exchanged = await api("/api/session/exchange", { entryToken });
+      if (!exchanged.ok) {
+        state = applyError(state, {
+          code: "auth_failed",
+          message: "This dashboard link expired. Run OpenRouter: Open Dashboard again.",
+          retryable: false
+        });
+        paint();
+        return;
+      }
+      sessionToken = String(exchanged.value.sessionToken ?? "");
+      sessionStorage.setItem(SESSION_STORAGE_KEY, sessionToken);
+    } else {
+      sessionToken = sessionStorage.getItem(SESSION_STORAGE_KEY) ?? "";
+      if (!sessionToken) {
+        state = applyError(state, {
+          code: "auth_failed",
+          message: "This dashboard link expired. Run OpenRouter: Open Dashboard again.",
+          retryable: false
+        });
+        paint();
+        return;
+      }
     }
-    sessionToken = String(exchanged.value.sessionToken ?? "");
     const status = await api("/api/connection/status");
     if (!status.ok) {
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
       state = applyError(state, asError(status));
       paint();
       return;
