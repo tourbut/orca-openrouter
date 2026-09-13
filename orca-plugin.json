@@ -1,0 +1,34 @@
+{
+  "manifestVersion": 1,
+  "id": "openrouter-usage",
+  "publisher": "tourbut",
+  "name": "OpenRouter Usage",
+  "version": "0.1.0",
+  "description": "Show OpenRouter cost, request, and token usage for completed UTC days in the Orca sidebar.",
+  "author": { "name": "tourbut" },
+  "repository": "https://github.com/tourbut/orca-openrouter",
+  "engines": { "orca": ">=1.4.198" },
+  "pluginApi": 1,
+  "main": "dist/main.mjs",
+  "contributes": {
+    "panels": [
+      {
+        "id": "usage",
+        "title": "OpenRouter Usage",
+        "icon": "activity",
+        "entry": "dist/panel.html"
+      }
+    ],
+    "commands": [
+      { "id": "openrouter.status", "title": "OpenRouter: Connection Status" },
+      { "id": "openrouter.refresh", "title": "OpenRouter: Refresh Usage" },
+      { "id": "openrouter.disconnect", "title": "OpenRouter: Disconnect" }
+    ]
+  },
+  "capabilities": [
+    { "kind": "secrets" },
+    { "kind": "storage" },
+    { "kind": "settings:own" },
+    { "kind": "notifications:show" }
+  ]
+}
