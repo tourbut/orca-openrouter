@@ -265,7 +265,7 @@ var ActivityCache = class {
     this.inflight.clear();
   }
   isFresh(entry, fingerprint, filterKey) {
-    return entry.fingerprint === fingerprint && entry.filterKey === filterKey && this.now() - entry.fetchedAt <= this.ttlMs;
+    return entry.fingerprint === fingerprint && entry.filterKey === filterKey && utcDateString(new Date(entry.fetchedAt)) === utcDateString(new Date(this.now())) && this.now() - entry.fetchedAt <= this.ttlMs;
   }
   isUsable(entry, fingerprint, filterKey) {
     return entry.fingerprint === fingerprint && entry.filterKey === filterKey;
@@ -522,6 +522,11 @@ var UsageService = class {
         retryable: false
       });
     }
+    if (generation !== this.cache.generation) {
+      const current = await this.options.store.secretsGet(SECRET_KEY);
+      if (current === parsed.apiKey) await this.options.store.secretsDelete(SECRET_KEY);
+      return fail({ code: "discarded", message: "Connection changed during verification.", retryable: true });
+    }
     this.cache.bumpGeneration();
     await this.cache.clearPersisted();
     const fingerprint = await sha256Hex(parsed.apiKey);
@@ -537,8 +542,8 @@ var UsageService = class {
     return ok({ connected: true });
   }
   async removeConnection() {
-    await this.options.store.secretsDelete(SECRET_KEY);
     this.cache.bumpGeneration();
+    await this.options.store.secretsDelete(SECRET_KEY);
     await this.cache.clearPersisted();
     return ok({ connected: false });
   }
@@ -562,7 +567,7 @@ var UsageService = class {
     if (!forceRefresh && this.cache.memory && this.cache.isFresh(this.cache.memory, this.cache.memory.fingerprint, filterKey)) {
       return ok(this.snapshotFromCache(this.cache.memory, period, "fresh", false));
     }
-    return this.cache.dedupe(`account:${this.cache.generation}`, async () => {
+    return this.cache.dedupe(`account:${this.cache.generation}:${period}`, async () => {
       const apiKey = await this.options.store.secretsGet(SECRET_KEY);
       if (!apiKey) {
         return fail({

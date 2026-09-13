@@ -211,14 +211,13 @@ function settingsForm(handlers: PanelHandlers, connected: boolean): HTMLElement 
       placeholder: 'sk-or-v1-…'
     }),
     el('div', { class: 'row' }, [
-      el('button', { class: 'primary', type: 'submit' }, ['Save and verify']),
+      el('button', { class: 'primary', type: 'button', id: 'save-key' }, ['Save and verify']),
       ...(connected
         ? [el('button', { class: 'ghost', type: 'button', id: 'disconnect' }, ['Disconnect'])]
         : [])
     ])
   )
-  form.addEventListener('submit', (event) => {
-    event.preventDefault()
+  form.querySelector('#save-key')?.addEventListener('click', () => {
     const input = form.querySelector('input[name="apiKey"]') as HTMLInputElement
     const value = input.value
     input.value = ''

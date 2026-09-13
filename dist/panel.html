@@ -496,12 +496,11 @@ button.ghost {
         placeholder: "sk-or-v1-\u2026"
       }),
       el("div", { class: "row" }, [
-        el("button", { class: "primary", type: "submit" }, ["Save and verify"]),
+        el("button", { class: "primary", type: "button", id: "save-key" }, ["Save and verify"]),
         ...connected ? [el("button", { class: "ghost", type: "button", id: "disconnect" }, ["Disconnect"])] : []
       ])
     );
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
+    form.querySelector("#save-key")?.addEventListener("click", () => {
       const input = form.querySelector('input[name="apiKey"]');
       const value = input.value;
       input.value = "";

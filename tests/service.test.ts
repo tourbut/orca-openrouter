@@ -152,3 +152,66 @@ test('duplicate in-flight queries share one HTTP request', async () => {
   assert.equal(left.ok && right.ok, true)
   if (left.ok) assert.equal(left.value.empty, true)
 })
+
+test('concurrent periods do not return the first caller’s period', async () => {
+  const store = createMemoryStore({ secrets: { [SECRET_KEY]: 'sk-or-v1-live' } })
+  const gate = deferred<void>()
+  let fetches = 0
+  const service = new UsageService({
+    store,
+    now: () => new Date('2026-09-12T12:00:00.000Z'),
+    fetchImpl: async () => {
+      fetches += 1
+      await gate.promise
+      return jsonResponse(200, { data: [rawItem({ date: '2026-08-20', usage: 1, byok_usage_inference: 0 })] })
+    }
+  })
+  const week = service.query({ period: 7, forceRefresh: true })
+  const month = service.query({ period: 30, forceRefresh: true })
+  gate.resolve()
+  const [left, right] = await Promise.all([week, month])
+  assert.equal(left.ok && left.value.period, 7)
+  assert.equal(right.ok && right.value.period, 30)
+  assert.equal(fetches, 2)
+})
+
+test('cache is not fresh after the UTC date changes', async () => {
+  const store = createMemoryStore({ secrets: { [SECRET_KEY]: 'sk-or-v1-live' } })
+  let now = new Date('2026-09-12T23:59:00.000Z')
+  let fetches = 0
+  const service = new UsageService({
+    store,
+    now: () => now,
+    fetchImpl: async () => {
+      fetches += 1
+      return jsonResponse(200, { data: [] })
+    }
+  })
+  await service.query({ period: 7 })
+  now = new Date('2026-09-13T00:01:00.000Z')
+  await service.query({ period: 7 })
+  assert.equal(fetches, 2)
+})
+
+test('disconnect wins over a save that finishes storage later', async () => {
+  const store = createMemoryStore()
+  const entered = deferred<void>()
+  const release = deferred<void>()
+  const original = store.secretsSet
+  store.secretsSet = async (key, value) => {
+    entered.resolve()
+    await release.promise
+    await original(key, value)
+  }
+  const service = new UsageService({
+    store,
+    fetchImpl: async () => jsonResponse(200, { data: [] })
+  })
+  const save = service.saveConnection({ apiKey: 'sk-or-v1-newkey' })
+  await entered.promise
+  await service.removeConnection()
+  release.resolve()
+  const result = await save
+  assert.equal(result.ok, false)
+  assert.equal((await service.connectionStatus()).connected, false)
+})

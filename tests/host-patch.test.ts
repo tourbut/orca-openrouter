@@ -3,9 +3,17 @@ import { test } from 'node:test'
 import { METHOD_NAMES, type MethodName } from '../src/shared/types.ts'
 import { PANEL_PLUGIN_REQUEST_TYPE } from '../src/shared/methods.ts'
 import { createFixedWindowAdmission, PanelRequestDispatcher } from '../host-patch/dispatcher.ts'
-import { parsePanelPluginRequest, toResultMessage, type SessionRecord } from '../host-patch/protocol.ts'
+import { parsePanelPluginRequest, toResultMessage, type DispatchResult, type SessionRecord } from '../host-patch/protocol.ts'
 
 const token = 'a'.repeat(32)
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
 
 function session(overrides: Partial<SessionRecord> = {}): SessionRecord {
   return {
@@ -63,6 +71,28 @@ test('dispatcher uses the session plugin key and drops dead sessions', async () 
   })
   assert.equal(dead.ok, false)
   if (!dead.ok) assert.equal(dead.code, 'unavailable')
+})
+
+test('dispatcher drops a response when the session is revoked during invocation', async () => {
+  const gate = deferred<DispatchResult>()
+  const session: SessionRecord = {
+    sessionToken: 'token',
+    pluginKey: 'tourbut.openrouter-usage',
+    panelId: 'usage',
+    allowedMethods: new Set(METHOD_NAMES),
+    consented: true,
+    enabled: true,
+    alive: true
+  }
+  const sessions = new Map([[session.sessionToken, session]])
+  const dispatcher = new PanelRequestDispatcher(sessions, async () => gate.promise)
+  const pending = dispatcher.handleTrustedCall({ sessionToken: session.sessionToken, method: 'usage.query' })
+  session.alive = false
+  session.enabled = false
+  gate.resolve({ ok: true, value: { secret: 'must-not-return' } })
+  const result = await pending
+  assert.equal(result.ok, false)
+  if (!result.ok) assert.equal(result.code, 'unavailable')
 })
 
 test('rate-limits and oversized worker results are rejected', async () => {

@@ -5,6 +5,7 @@ import {
   type ActivityItem
 } from '../shared/types.ts'
 import { jsonUtf8Bytes } from '../shared/bytes.ts'
+import { utcDateString } from '../shared/utc.ts'
 import type { PluginStore } from './store.ts'
 
 export type CachedActivity = {
@@ -35,6 +36,7 @@ export class ActivityCache {
     return (
       entry.fingerprint === fingerprint &&
       entry.filterKey === filterKey &&
+      utcDateString(new Date(entry.fetchedAt)) === utcDateString(new Date(this.now())) &&
       this.now() - entry.fetchedAt <= this.ttlMs
     )
   }

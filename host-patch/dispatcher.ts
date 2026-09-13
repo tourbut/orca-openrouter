@@ -73,6 +73,16 @@ export class PanelRequestDispatcher {
       call.params,
       generation
     )
+    const current = this.sessions.get(call.sessionToken)
+    if (
+      !current ||
+      !current.alive ||
+      !current.enabled ||
+      !current.consented ||
+      current.pluginKey !== session.pluginKey
+    ) {
+      return { ok: false, code: 'unavailable', error: 'panel session is no longer active' }
+    }
     if (jsonUtf8Bytes(result) > PANEL_MESSAGE_MAX_BYTES) {
       return {
         ok: false,

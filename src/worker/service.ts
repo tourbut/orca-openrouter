@@ -98,6 +98,14 @@ export class UsageService {
       })
     }
 
+    // Disconnect or another key replacement may have started while the
+    // verification request was in flight. Do not resurrect that connection.
+    if (generation !== this.cache.generation) {
+      const current = await this.options.store.secretsGet(SECRET_KEY)
+      if (current === parsed.apiKey) await this.options.store.secretsDelete(SECRET_KEY)
+      return fail({ code: 'discarded', message: 'Connection changed during verification.', retryable: true })
+    }
+
     this.cache.bumpGeneration()
     await this.cache.clearPersisted()
     const fingerprint = await sha256Hex(parsed.apiKey)
@@ -114,8 +122,8 @@ export class UsageService {
   }
 
   async removeConnection(): Promise<MethodResult<ConnectionStatus>> {
-    await this.options.store.secretsDelete(SECRET_KEY)
     this.cache.bumpGeneration()
+    await this.options.store.secretsDelete(SECRET_KEY)
     await this.cache.clearPersisted()
     return ok({ connected: false })
   }
@@ -142,7 +150,9 @@ export class UsageService {
       return ok(this.snapshotFromCache(this.cache.memory, period, 'fresh', false))
     }
 
-    return this.cache.dedupe(`account:${this.cache.generation}`, async () => {
+    // Dedupe the HTTP request only for callers requesting the same period;
+    // the returned snapshot is period-specific.
+    return this.cache.dedupe(`account:${this.cache.generation}:${period}`, async () => {
       const apiKey = await this.options.store.secretsGet(SECRET_KEY)
       if (!apiKey) {
         return fail<UsageSnapshot>({
