@@ -4,7 +4,7 @@
   "publisher": "tourbut",
   "name": "OpenRouter Usage",
   "version": "0.1.0",
-  "description": "Show OpenRouter cost, request, and token usage for completed UTC days in the Orca sidebar.",
+  "description": "Open an OpenRouter usage dashboard from the command palette. Live data runs in an Orca browser tab.",
   "author": { "name": "tourbut" },
   "repository": "https://github.com/tourbut/orca-openrouter",
   "engines": { "orca": ">=1.4.198" },
@@ -20,6 +20,7 @@
       }
     ],
     "commands": [
+      { "id": "openrouter.openDashboard", "title": "OpenRouter: Open Dashboard" },
       { "id": "openrouter.status", "title": "OpenRouter: Connection Status" },
       { "id": "openrouter.refresh", "title": "OpenRouter: Refresh Usage" },
       { "id": "openrouter.disconnect", "title": "OpenRouter: Disconnect" }

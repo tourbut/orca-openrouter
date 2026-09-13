@@ -7,6 +7,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "secret-scan": "node scripts/secret-scan.mjs",
     "verify:api": "tsx scripts/verify-activity.ts",
     "preview": "npm run build && tsx scripts/preview-host.ts"
   },

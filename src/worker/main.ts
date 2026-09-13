@@ -2,6 +2,7 @@ import { redactSecrets } from '../shared/redact.ts'
 import type { MethodName } from '../shared/types.ts'
 import { isMethodName } from '../shared/methods.ts'
 import { SECRET_KEY } from '../shared/types.ts'
+import { DashboardRuntime, pluginRootFromModuleUrl } from './open-dashboard.ts'
 import { formatNotificationSummary, UsageService } from './service.ts'
 import { createOrcaStore, type OrcaApi } from './store.ts'
 
@@ -13,6 +14,12 @@ type PluginOrca = OrcaApi & {
   commands: { register(id: string, handler: (args?: unknown) => Promise<unknown>): void }
   requests?: RequestApi
 }
+
+type Runtime = {
+  stop(): Promise<void>
+}
+
+let runtime: Runtime | null = null
 
 function notificationBody(result: Awaited<ReturnType<UsageService['query']>>): string {
   if (result.ok) return formatNotificationSummary(result.value)
@@ -28,8 +35,20 @@ export default async function activate(orca: PluginOrca): Promise<void> {
   })
   const existing = await store.secretsGet(SECRET_KEY)
   await service.hydrateFromStorage(existing)
+  const pluginRoot = pluginRootFromModuleUrl(import.meta.url)
+  const dashboard = new DashboardRuntime(orca, service, pluginRoot)
+  runtime = dashboard
 
-  const dispatch = (method: MethodName, params: unknown) => service.dispatch(method, params)
+  orca.commands.register('openrouter.openDashboard', async () => {
+    const result = await dashboard.open()
+    await store.notify?.(
+      'OpenRouter Usage',
+      result.ok
+        ? 'Opened the usage dashboard in an Orca browser tab.'
+        : result.error ?? 'Could not open the dashboard.'
+    )
+    return result.ok ? { ok: true, reused: result.reused } : { ok: false, error: result.error }
+  })
 
   orca.commands.register('openrouter.status', async () => {
     const status = await service.connectionStatus()
@@ -61,17 +80,24 @@ export default async function activate(orca: PluginOrca): Promise<void> {
   })
 
   if (orca.requests && typeof orca.requests.register === 'function') {
-    const register = (method: MethodName) => {
-      orca.requests!.register(method, (params) => dispatch(method, params))
+    const dispatch = (method: MethodName, params: unknown) => service.dispatch(method, params)
+    for (const method of [
+      'connection.status',
+      'connection.save',
+      'connection.remove',
+      'usage.query',
+      'preferences.update'
+    ] as const) {
+      orca.requests.register(method, (params) => dispatch(method, params))
     }
-    register('connection.status')
-    register('connection.save')
-    register('connection.remove')
-    register('usage.query')
-    register('preferences.update')
   } else {
-    orca.log('panel request API is not present on this Orca host')
+    orca.log('panel request API is not present; use Open Dashboard')
   }
+}
+
+export async function deactivate(): Promise<void> {
+  await runtime?.stop()
+  runtime = null
 }
 
 export function createStandaloneDispatcher(service: UsageService) {
